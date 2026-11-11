@@ -1,101 +1,94 @@
-# PatientPal — On-Device AI Context Pipeline (Code Sample)
+# PatientPal — On-Device AI Context Pipeline
 
-**Swift · Apple Foundation Models · Structured generation · Context selection**
+A standalone Swift sample adapted from the multi-stage AI workflow in the collaborative PatientPal iOS project. It demonstrates structured context selection, profile extraction, answer generation, and a separate response-review stage.
 
-This is a **sanitized, shortened adaptation** of the `modelQuery(input:)` workflow in the PatientPal iOS app, developed as a collaborative project. The full application's source repository is private. This sample shows the architectural approach without including user records, credentials, application configuration, or proprietary supporting components.
+**Start with [`ContextPipeline.swift`](Sources/PatientPalSample/ContextPipeline.swift), then [`AppleContextModel.swift`](Sources/PatientPalSample/AppleContextModel.swift).** These files show the orchestration and actual Foundation Models integration.
 
-## What it demonstrates
+This expanded public adaptation was prepared with AI assistance. Packaging, validation, fixtures, and tests were added for this sample; they are not presented as historical application code or proof of any one collaborator's authorship. See [provenance and changes](PROVENANCE.md).
 
-1. Encode stored visit summaries and profile information as structured JSON.
-2. Use on-device structured generation to select up to three relevant visits for a question.
-3. Summarize only the relevant patient-profile context.
-4. Compose an answer grounded in that selected context.
-5. Pass the draft through an additional model-based screen intended to suppress unsupported medical claims.
+## Architecture
 
-The screening stage is **not independently validated** and does not make this prototype suitable for clinical use. These steps are representative of the original application; the data-transfer objects (`VisitDTO`, `UserProfileDTO`) belong to the private application and are intentionally omitted. This is a code sample, not a standalone buildable app.
-
-## Representative Swift implementation
-
-```swift
-import Foundation
-import FoundationModels
-
-@Generable
-struct ProfileSummary: Codable {
-    let summary: String
-}
-
-// Adapted from PatientPal/LLMViews/Automating.swift, modelQuery(input:).
-// VisitDTO and UserProfileDTO are private application types.
-func respondToQuestion(
-    _ question: String,
-    visits: [VisitDTO],
-    profiles: [UserProfileDTO]
-) async throws -> String {
-    let model = SystemLanguageModel.default
-
-    // Stage 1: Select structured records that matter to the question.
-    let visitJSON = String(
-        data: try JSONEncoder().encode(visits), encoding: .utf8
-    ) ?? "[]"
-    let visitSession = LanguageModelSession(
-        model: model,
-        instructions: "Select only relevant records. Do not invent information."
-    )
-    let matched = try await visitSession.respond(
-        to: "Question: \(question)\nVisits (JSON): \(visitJSON)\nReturn at most three relevant visits.",
-        generating: [VisitDTO].self
-    )
-    let relevantVisitJSON = String(
-        data: try JSONEncoder().encode(matched.content), encoding: .utf8
-    ) ?? "[]"
-
-    // Stage 2: Extract the minimal relevant profile information.
-    let profileJSON = String(
-        data: try JSONEncoder().encode(profiles), encoding: .utf8
-    ) ?? "[]"
-    let profileSession = LanguageModelSession(
-        model: model,
-        instructions: "Summarize only profile facts relevant to the question."
-    )
-    let profile = try await profileSession.respond(
-        to: "Question: \(question)\nProfile (JSON): \(profileJSON)",
-        generating: ProfileSummary.self
-    )
-
-    // Stage 3: Generate an answer using selected context, not the full database.
-    let answerSession = LanguageModelSession(
-        model: model,
-        instructions: "Answer concisely using the provided records."
-    )
-    let draft = try await answerSession.respond(to: """
-        Question: \(question)
-        Relevant visits: \(relevantVisitJSON)
-        Relevant profile: \(profile.content.summary)
-        """)
-
-    // Stage 4: Secondary screening; this is not a clinical safety guarantee.
-    let screenSession = LanguageModelSession(
-        model: model,
-        instructions: """
-            Review the drafted response. If it contains unsupported medical
-            advice or diagnoses, replace it with a refusal. Otherwise,
-            preserve the answer verbatim.
-            """
-    )
-    let screened = try await screenSession.respond(
-        to: "Draft response: \(draft.content)"
-    )
-    return screened.content
-}
+```text
+Question + supplied visits ──► structured visit-ID selection
+                                    │
+                            validate IDs and recover original records
+                                    │
+Question + supplied profile ─► relevant profile summary
+                                    │
+                            selected context + question
+                                    │
+                              draft generation
+                                    │
+                            context-aware review
+                                    │
+                            accepted draft / fixed refusal
 ```
 
-## Engineering considerations
+Each live stage uses a separate Apple `LanguageModelSession`. This is model-guided retrieval over a small structured input; it does not use embeddings or a vector database. The selection stage sees all supplied visit summaries. Only the answer stage receives the selected subset.
 
-- **Separation of responsibilities:** retrieval, profile-context extraction, response generation, and screening use separate model sessions.
-- **Typed intermediates:** generated visits and profile summaries have explicitly constrained output types.
-- **Context minimization:** the answer model receives a selected set of records rather than the entire visit history.
-- **On-device processing:** the pipeline is based on Apple's Foundation Models, with no external model API in this code path.
-- **Limitations:** model-selected context can omit relevant details; screening can make mistakes; clinical safety and privacy compliance require separate validation and security review.
+## Repository guide
 
-**Provenance:** Adapted and abbreviated from a collaborative PatientPal project for a software internship application. The original implementation's source and models remain private. No patient data appears in this sample.
+| File | Responsibility |
+| --- | --- |
+| [`Models.swift`](Sources/PatientPalSample/Models.swift) | Minimal Codable records, typed results/errors, and model interface |
+| [`ContextPipeline.swift`](Sources/PatientPalSample/ContextPipeline.swift) | Four-stage orchestration, selection validation, budgets, cancellation, and refusal handling |
+| [`AppleContextModel.swift`](Sources/PatientPalSample/AppleContextModel.swift) | On-device sessions, guided generation, JSON prompt inputs, and availability checks |
+| [`Demo.swift`](Sources/PatientPalDemo/Demo.swift) | Synthetic scheduling example with scripted and live modes |
+| [`PipelineTests.swift`](Tests/PatientPalSampleTests/PipelineTests.swift) | Deterministic orchestration and failure-path tests |
+| [`PROVENANCE.md`](PROVENANCE.md) | Relationship to original project and newly added sample behavior |
+
+## Run
+
+Requires macOS 26 or later and full Xcode 26 with Swift 6.2 and the macOS 26 SDK. The standalone Command Line Tools may lack the Foundation Models macro plugin; use the full Xcode toolchain (set `DEVELOPER_DIR` to your Xcode app’s `Contents/Developer` directory if needed). The package has no third-party dependencies and requires no API keys.
+
+```sh
+git clone https://github.com/Griffinjlee/patientpal-ai-code-sample.git
+cd patientpal-ai-code-sample
+swift test
+swift run patientpal-demo
+```
+
+The default demo is **scripted**: it exercises the pipeline without invoking an AI model. Its predetermined answers are not evidence of retrieval quality. Tests also use a controlled stub and require no enabled model.
+
+For real on-device generation on an eligible Mac with Apple Intelligence enabled and the model available:
+
+```sh
+swift run patientpal-demo --live
+```
+
+The live adapter checks model availability and propagates errors. It has no cloud fallback. Live answers are nondeterministic and may differ from the scripted example.
+
+## Design decisions
+
+### Preserve source records
+
+The model selects IDs, and the pipeline retrieves the original records by those IDs. Invented, duplicated, or excessive selections are rejected before answer generation. This prevents generated record copies from silently becoming the source of truth, although it does not guarantee that the selection is relevant or complete.
+
+### Separate model stages
+
+A protocol exposes the four stages independently, allowing deterministic tests of orchestration without confusing model quality with program correctness. The profile summary remains model-generated and can contain omissions or errors.
+
+### Minimize context and logging
+
+The public schema intentionally excludes names, contacts, insurance details, and recordings. The pipeline does not print record contents. The executable prints only results from its embedded synthetic fixtures. No application database or real user data is loaded.
+
+### Handle failure explicitly
+
+Invalid input, invalid selections, empty drafts, and model errors fail through typed errors. Empty context produces a distinct no-context result. A blocked screen returns a fixed refusal; a failed screen throws rather than releasing the draft. Cancellation is checked between stages.
+
+### Keep limitations visible
+
+Character budgets are defensive sample limits, not precise model-token budgeting. Model context-window errors still propagate. Prompts label input as untrusted, but prompt instructions do not guarantee resistance to injection. Neither the model-based review nor the test suite validates medical accuracy or clinical safety. This is an educational prototype, not a clinical tool.
+
+## Tests and validation
+
+The tests cover preserving selected source records, stage ordering, invented/duplicate/excess IDs, empty context, profile-only context, blocked output, screening failure, blank questions, duplicate source IDs, oversized input, empty drafts, and cancellation.
+
+Build and test results are recorded in [VALIDATION.md](VALIDATION.md). The live model's answer quality is not assessed by these deterministic tests.
+
+## References
+
+- [Apple Foundation Models documentation](https://developer.apple.com/documentation/foundationmodels)
+- [Generating content with Foundation Models](https://developer.apple.com/documentation/foundationmodels/generating-content-and-performing-tasks-with-foundation-models)
+
+The full PatientPal application remains private. This repository includes only the reviewed public adaptation and synthetic example data.
